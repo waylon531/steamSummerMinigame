@@ -114,5 +114,305 @@ function attemptRespawn() {
 function hasCooldown(abilityId) {
 	return g_Minigame.CurrentScene().GetCooldownForAbility(abilityId) > 0;
 }
+CSceneGame.prototype.Tick = function()
+{
+
+
+	CSceneMinigame.prototype.Tick.call(this);
+
+	var nNow = performance.now();
+
+	if( document.hidden || document.webkitHidden || document.mozHidden || document.msHidden )
+	{
+		//console.log("Page not visibile, will not tick");
+		return; // Don't bother rendering while out of focus.
+	}
+
+	if( this.m_bRunning && !this.m_bWaitingForResponse )
+	{
+		var instance = this;
+
+		// request player names as soon as we go running
+		if ( !this.m_bRequestedPlayerNames && this.m_rgGameData.status == '2' )
+		{
+			this.m_bRequestedPlayerNames = true;
+			this.RequestOutstandingPlayerNames( true, null );
+		}
+
+		var bTickAll = ( ( nNow - this.m_nLastTick ) > g_msTickRate || this.m_nLastTick === false );
+		if ( bTickAll )
+		{
+			this.m_nLastTick = nNow;
+
+			// Do abilities
+			var rgRequest = {
+				'requested_abilities': this.m_rgAbilityQueue
+			};
+			this.m_rgAbilityQueue = [];
+			this.m_nClicks = 30;
+			if( this.m_nClicks > 0 )
+			{
+				rgRequest.requested_abilities.push(
+					{
+						'ability': k_ETowerAttackAbility_Attack,
+						'num_clicks': this.m_nClicks
+					}
+				);
+			}
+
+			this.m_nLastClicks = this.m_nClicks;
+			this.m_nClicks = 0;
+
+			this.m_bWaitingForResponse = true;
+			if( rgRequest.requested_abilities.length > 0 )
+			{
+				g_Server.UseAbilities(function(rgResult)
+				{
+					if( rgResult.response.player_data )
+					{
+						instance.m_rgPlayerData = rgResult.response.player_data;
+						instance.ApplyClientOverrides('player_data', true);
+						instance.ApplyClientOverrides('ability', true);
+					}
+
+					instance.m_bWaitingForResponse = false;
+					if( rgResult.response.tech_tree )
+					{
+						instance.m_rgPlayerTechTree = rgResult.response.tech_tree;
+						if( rgResult.response.tech_tree.upgrades )
+							instance.m_rgPlayerUpgrades = V_ToArray( rgResult.response.tech_tree.upgrades );
+						else
+							instance.m_rgPlayerUpgrades = [];
+					}
+					instance.OnReceiveUpdate();
+				},
+				function(){
+					instance.m_bWaitingForResponse = false;
+				}
+				, rgRequest );
+
+				if( instance.m_bNeedTechTree )
+				{
+					g_Server.GetPlayerData(function(rgResult){
+						if( rgResult.response.player_data )
+						{
+							instance.m_rgPlayerData = rgResult.response.player_data;
+							instance.ApplyClientOverrides('player_data');
+							instance.ApplyClientOverrides('ability');
+						}
+						if( rgResult.response.tech_tree )
+						{
+							instance.m_rgPlayerTechTree = rgResult.response.tech_tree;
+							if( rgResult.response.tech_tree.upgrades )
+								instance.m_rgPlayerUpgrades = V_ToArray( rgResult.response.tech_tree.upgrades );
+							else
+								instance.m_rgPlayerUpgrades = [];
+						}
+						instance.m_bWaitingForResponse = false;
+						//instance.OnReceiveUpdate();
+						instance.OnServerTick();
+					},
+					function( err )
+					{
+						console.log("Network error");
+						console.log(err);
+						instance.m_bWaitingForResponse = false;
+					},
+					this.m_bNeedTechTree);
+				}
+
+			}
+			else
+			{
+				g_Server.GetPlayerData(
+					function(rgResult){
+						if( rgResult.response.player_data )
+						{
+							instance.m_rgPlayerData = rgResult.response.player_data;
+							instance.ApplyClientOverrides('player_data');
+							instance.ApplyClientOverrides('ability');
+						}
+						if( rgResult.response.tech_tree )
+						{
+							instance.m_rgPlayerTechTree = rgResult.response.tech_tree;
+							if( rgResult.response.tech_tree.upgrades )
+								instance.m_rgPlayerUpgrades = V_ToArray( rgResult.response.tech_tree.upgrades );
+							else
+								instance.m_rgPlayerUpgrades = [];
+						}
+						instance.m_bWaitingForResponse = false;
+						instance.OnReceiveUpdate();
+						instance.OnServerTick();
+					},
+					function( err )
+					{
+						console.log("Network error");
+						console.log(err);
+						instance.m_bWaitingForResponse = false;
+					},
+					this.m_bNeedTechTree
+				);
+				instance.m_bNeedTechTree = false;
+			}
+
+			this.SendChooseUpgradesRequest();
+			this.SendSpendBadgePointsRequest();
+		}
+
+		if ( bTickAll || this.m_bReceivedStaleResponse )
+		{
+			this.m_bReceivedStaleResponse = false;
+
+			// Get game state
+			g_Server.GetGameData(
+				function(rgResult){
+					if( rgResult.response.game_data )
+						instance.m_rgGameData = rgResult.response.game_data;
+
+					if( rgResult.response.stats )
+						instance.m_rgStats = rgResult.response.stats;
+
+					instance.OnGameDataUpdate();
+
+				},
+				function( err )
+				{
+					console.log("Network error");
+					console.log(err);
+				},
+				instance.m_rgGameData && instance.m_rgGameData.status == 1			);
+			// Switch lane
+			//console.log(this.m_rgPlayerData);
+			//if( this.m_rgPlayerData.current_lane != undefined )
+			//	this.m_containerEnemies.x = this.m_containerBG.x = this.m_rgPlayerData.current_lane * -765;
+		}
+	}
+
+	this.TickBG();
+
+
+	if( this.m_easingBG && !this.m_easingBG.m_bComplete )
+	{
+		var x = Math.floor(this.m_easingBG.Get());
+		if( this.m_easingBG.bIsDone() ) // We intentionally checked the variable before and the function now so we can catch the frame in which we become compelte
+		{
+			x = this.m_easingBG.GetTarget();
+		}
+
+		this.m_containerEnemies.x = this.m_containerParticles.x = x;
+		//this.m_containerBG.x = Math.floor( x/-3 );
+		this.m_rtBackground.render( this.m_containerBG );
+	} else if ( this.m_easingBG && this.m_easingBG.m_bComplete && this.m_rgPlayerData.current_lane != this.m_nExpectedLane )
+	{
+		var nDeltaX = (this.m_rgPlayerData.current_lane * -g_nLaneScrollAmount) - this.m_containerEnemies.x
+		this.m_easingBG = new CEasingQuadOut(this.m_containerEnemies.x, nDeltaX, 750);
+		this.m_nExpectedLane = this.m_rgPlayerData.current_lane;
+		console.log("DURN GHOSTS CHANGING MY LANE AGAIN");
+	}
+
+	this.m_UI.Tick();
+
+	// Tick enemies
+
+	/*if( this.m_rgGameData != false )
+	{
+		for( var i=0; i<this.m_rgGameData.lanes.length; i++)
+		{
+			for( var j=0; j<this.m_rgGameData.lanes[i].enemies.length; j++)
+			{
+				//if( this.m_rgGameData.lanes[i].enemies[j].hp <= 0  )
+				//	continue;
+
+				var enemy = this.GetEnemy( i, j );
+				if( !enemy )
+					continue;
+				enemy.m_data = this.m_rgGameData.lanes[i].enemies[j];
+				enemy.Tick();
+			}
+		}
+	}*/
+
+	for( var i=0; i<this.m_rgEnemies.length; i++)
+	{
+		this.m_rgEnemies[i].Tick();
+	}
+
+	// Tick click numbers
+	for( var i=0; i< this.m_rgClickNumbers.length; i++ )
+	{
+		var t = this.m_rgClickNumbers[i];
+		if( t.m_easeY )
+		{
+			t.m_easeY.Update();
+			if( t.m_easeY.bIsDone() )
+			{
+				t.container.removeChild(t);
+				this.m_rgClickNumbers.splice(i,1);
+			}
+			t.y = t.m_easeY.Get();
+		}
+
+		if( t.m_easeX )
+			t.x = t.m_easeX.Get();
+
+		if( t.m_easeAlpha )
+		{
+			t.alpha = t.m_easeAlpha.Get();
+			if( t.alpha > 1 )
+				t.alpha = 1;
+		}
+	}
+
+	// Did we die?
+	if( !this.m_bIsDead && this.m_rgPlayerData && this.m_rgPlayerData.hp <= 0 )
+	{
+		//console.log("DIED");
+		this.m_bIsDead = true;
+
+		this.m_overlayDead.visible = true;
+
+		// Show overlay and respawn button
+
+		g_AudioManager.play( 'dead' );
+	}
+
+	//this.TickBG();
+
+	var now = Date.now();
+	var flDelta = (now - this.m_nLocalTime) * 0.001;
+	this.m_nLocalTime = now;
+
+	for ( var i=this.m_rgEmitters.length-1; i >= 0; i--)
+	{
+		if( this.m_rgEmitters[i].emit == false && this.m_rgEmitters[i]._activeParticles.length == 0 )
+		{
+
+			this.m_rgEmitters.splice(i,1);
+
+		} else
+		{
+			this.m_rgEmitters[i].update( flDelta );
+		}
+	}
+
+	//this.m_emitterTest.update(flDelta);
+
+	if( this.m_spriteFinger )
+	{
+		var nScaleValue = 2;
+		this.m_nFingerIndex = ( this.m_nFingerIndex + 1 ) % ( this.m_rgFingerTextures.length * nScaleValue );
+		this.m_spriteFinger.texture =  this.m_rgFingerTextures[Math.floor(this.m_nFingerIndex / nScaleValue)];
+
+
+		var enemy = this.GetEnemy( this.m_rgPlayerData.current_lane, this.m_rgPlayerData.target  );
+		if( enemy )
+		{
+			this.m_spriteFinger.position.x = enemy.m_Sprite.x - 20;
+			this.m_spriteFinger.position.y = enemy.m_Sprite.y - 200;
+		}
+
+	}
+
+}
 
 var thingTimer = window.setInterval(doTheThing, 1000);
